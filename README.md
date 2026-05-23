@@ -12,17 +12,57 @@ export ADMIN_PASSWORD=yourpassword  # Linux / macOS
 python share.py
 ```
 
-Open [http://localhost:8000](http://localhost:8000) in your browser.
+Open [http://localhost:8113](http://localhost:8113) in your browser.
+
+---
+
+## Command-Line Arguments
+
+```
+python share.py [--port PORT] [--dir PATH]
+```
+
+| Argument | Default | Description |
+|---|---|---|
+| `--port` | `8113` | TCP port the server listens on |
+| `--dir` | `C:\Share` | Root folder exposed to the browser |
+
+**Examples:**
+
+```bash
+python share.py --port 9000
+python share.py --dir D:\MyFiles
+python share.py --port 9000 --dir D:\MyFiles
+```
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `ADMIN_PASSWORD` | `admin123` | Password for the admin account. **Always set this in production.** |
+
+Set it before launching the server:
+
+```bash
+# Windows
+set ADMIN_PASSWORD=yourpassword
+python share.py
+
+# Linux / macOS
+export ADMIN_PASSWORD=yourpassword
+python share.py
+```
+
+---
 
 ## Configuration
 
-All settings are constants at the top of `share.py`:
+Runtime constants at the top of `share.py` control behaviour that is not exposed as CLI arguments:
 
 | Constant | Default | Description |
 |---|---|---|
-| `PORT` | `8000` | TCP port the server listens on |
-| `BASE_DIR` | `C:\Share` | Root directory exposed to the browser |
-| `ADMIN_PASSWORD` | `admin123` (env: `ADMIN_PASSWORD`) | Admin login password |
 | `CHUNK` | `1 MB` | Read/write chunk size for file streaming |
 | `SESSION_TTL` | `28800` (8 h) | Admin session lifetime in seconds |
 | `MAX_FAILURES` | `5` | Failed login attempts before IP lockout |
@@ -32,40 +72,78 @@ All settings are constants at the top of `share.py`:
 | `BACKUP_COUNT` | `5` | Number of rotated log files to keep |
 | `CONFIG_FILE` | `config.json` (same folder as `share.py`) | Path where upload restrictions are persisted |
 
+---
+
+## Admin Login
+
+Click **👤 Admin login** in the top-right corner to open the login form.
+
+- Enter the password set via the `ADMIN_PASSWORD` environment variable
+- The session lasts **8 hours** and is stored server-side — the browser cookie holds only a random token, not the admin flag
+- After login the header shows **⚙ Config** and **👤 Logout**
+- After **5 failed attempts** from the same IP the login form is locked out for **5 minutes**
+
+---
+
+## Admin Features
+
+### File and Folder Management
+
+These actions are available only to logged-in admins:
+
+| Action | How |
+|---|---|
+| **Delete file** | Click 🗑 on any file row |
+| **Delete folder** | Click 🗑 on any folder row — recursively removes all contents |
+| **Rename file** | Click ✏️ to open an inline modal pre-filled with the current name |
+
+> **Create Folder** (📁 New Folder) is available to all users — no login required.
+
+### Upload Restrictions
+
+Navigate to **⚙ Config** to set upload rules that apply to all users:
+
+| Setting | Description |
+|---|---|
+| **Max upload size (MB)** | Reject files larger than this; `0` = unlimited |
+| **Blocked extensions** | Comma-separated list, e.g. `.exe, .bat, .sh` |
+
+Changes take effect immediately without restarting the server and are **persisted to `config.json`** so they survive restarts.
+
+**Extension format:** leading dot is optional — `.exe` and `exe` both work. Matching is case-insensitive.
+
+---
+
 ## Features
 
 ### File Browsing
-- Lists files and folders inside `BASE_DIR` and any subfolder
-- **Breadcrumb navigation** — clickable path segments at the top of every page for quick jumps up the directory tree
-- **Search** — instant client-side filtering by filename across both view modes
-- **Sort** — toolbar dropdown to sort by Name, Size, or Date (ascending or descending); choice is saved per browser
+- Lists files and folders inside the shared directory and any subfolder
+- **Breadcrumb navigation** — clickable path segments at the top of every page
+- **Search** — instant client-side filtering by filename
+- **Sort** — sort by Name, Size, or Date (ascending or descending); preference saved per browser
 
-### Two View Modes
+### View Modes
+
 | Mode | Description |
 |---|---|
 | **Detail view** (default) | Compact table — Name, Size, Modified, actions |
 | **Card view** | Larger tiles showing name and metadata |
 
-Toggle with the **⊞ / ☰** button in the header. Preference is saved per browser.
+Toggle with the **⊞ / ☰** button in the header.
 
 ### Light / Dark Theme
 - Dark by default; toggle with the **☀️ / 🌙** button in the header
-- Preference is saved per browser via `localStorage`
+- Preference saved per browser via `localStorage`
 
 ### File Download
 - Click **⬇** on any file row to download with a live progress bar
 
 ### File Upload
-- **Drag and drop** files onto the drop zone
-- **Browse** with the file picker button (supports multi-file selection)
-- Upload progress bar shown during transfer
-- Uploads are written atomically via temporary files — a rejected or failed upload never leaves a partial file on disk
-- All files in a batch are validated before any are written; if one fails, the entire batch is rejected
-
-### Create Folder
-- Available to **all users** (no login required)
-- Click **📁 New Folder** in the toolbar, enter a name, then press Enter or click Create
-- The folder is created inside whichever directory is currently open
+- **Drag and drop** files onto the drop zone, or use the **📂 Browse Files** button
+- Multi-file selection supported
+- Progress bar shown during transfer
+- Uploads are written atomically via temporary files — a failed or rejected upload never leaves a partial file on disk
+- All files in a batch are validated before any are written; if one fails the entire batch is rejected
 
 ### Folder Title and Description
 Place a `.title` file inside any folder to show a custom heading at the top of its listing:
@@ -78,36 +156,7 @@ Shared assets for the Q1 2026 release
 - Line 1 → folder title (large heading)
 - Remaining lines → description (shown as smaller subtext)
 
-The `.title` file itself is hidden from the file listing.
-
----
-
-## Admin Features
-
-Click **👤 Admin login** (top right) to log in. The session lasts 8 hours and is stored server-side — manually setting a cookie grants no access.
-
-After login the header shows **⚙ Config** and **👤 Logout**.
-
-### File and Folder Management
-
-| Action | How |
-|---|---|
-| **Delete file** | Click 🗑 on any file row |
-| **Delete folder** | Click 🗑 on any folder row — recursively removes all contents |
-| **Rename file** | Click ✏️ to open an inline modal pre-filled with the current name |
-
-### Upload Restrictions
-
-Navigate to **⚙ Config** to set upload rules that apply to all users:
-
-| Setting | Description |
-|---|---|
-| **Max upload size (MB)** | Reject files larger than this; `0` = unlimited |
-| **Blocked extensions** | Comma-separated list, e.g. `.exe, .bat, .sh` |
-
-Rejected files show an error alert in the browser. Changes take effect immediately without restarting the server.
-
-Settings are **persisted to `config.json`** in the same directory as `share.py` and are automatically reloaded on the next server start. If `config.json` does not exist, the server starts with defaults (100 MB max upload size, no blocked extensions).
+The `.title` file is hidden from the file listing.
 
 ---
 
@@ -115,12 +164,12 @@ Settings are **persisted to `config.json`** in the same directory as `share.py` 
 
 | Protection | Detail |
 |---|---|
-| **Server-side sessions** | Admin is verified via a cryptographically random token stored in server memory — the cookie holds only the token, not the admin flag |
+| **Server-side sessions** | Admin verified via a cryptographically random token in server memory — the cookie holds only the token |
 | **Session expiry** | Tokens expire after 8 hours; expired tokens are pruned on each new login |
 | **CSRF protection** | All state-changing requests (upload, delete, rename, mkdir) require a per-session `X-CSRF-Token` header injected by the page JS |
-| **Path traversal prevention** | Every requested path is normalised with `os.path.normpath` and checked to remain inside `BASE_DIR`; requests outside return 403 |
+| **Path traversal prevention** | Every path is normalised with `os.path.normpath` and checked to remain inside the shared directory; requests outside return 403 |
 | **Login rate limiting** | After 5 failed attempts the client IP is locked out for 5 minutes |
-| **HttpOnly session cookie** | Cookie is `HttpOnly; SameSite=Strict` — not readable by JavaScript |
+| **HttpOnly session cookie** | Cookie is `HttpOnly; SameSite=Strict` — not accessible via JavaScript |
 
 ---
 
@@ -151,7 +200,7 @@ All significant events are written to `share.log` (rotating, max 5 × 5 MB):
 
 **Windows — Task Scheduler:**
 1. Create a Basic Task → trigger: At startup
-2. Action: `python.exe`, argument: `d:\path\to\share.py`
+2. Action: `python.exe`, arguments: `d:\path\to\share.py --port 8113 --dir C:\Share`
 3. Add `ADMIN_PASSWORD` as an environment variable in the task settings
 
 **Linux — systemd:**
@@ -161,7 +210,7 @@ All significant events are written to `share.log` (rotating, max 5 × 5 MB):
 Description=File Share
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/share/share.py
+ExecStart=/usr/bin/python3 /opt/share/share.py --port 8113 --dir /srv/share
 Environment=ADMIN_PASSWORD=yourpassword
 Restart=always
 

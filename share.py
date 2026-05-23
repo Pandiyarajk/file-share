@@ -11,11 +11,12 @@ Features:
 Usage:
     set ADMIN_PASSWORD=yourpassword   # Windows
     export ADMIN_PASSWORD=yourpassword  # Linux/macOS
-    python share.py
+    python share.py [--port PORT] [--dir PATH]
 
 Requirements: Python 3.10+, no third-party packages.
 """
 
+import argparse
 import http.server
 import json
 import logging
@@ -35,8 +36,13 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 # Configuration
 # ---------------------------------------------------------------------------
 
-PORT = 8000
-BASE_DIR = r"C:\Share"
+_parser = argparse.ArgumentParser(description="Lightweight HTTP file server")
+_parser.add_argument("--port", type=int, default=8113, help="Port to listen on (default: 8113)")
+_parser.add_argument("--dir", default=r"C:\Share", help="Shared folder path (default: C:\\Share)")
+_args = _parser.parse_args()
+
+PORT = _args.port
+BASE_DIR = _args.dir
 CHUNK = 1024 * 1024                                         # file streaming chunk size
 LOG_FILE = "share.log"
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
