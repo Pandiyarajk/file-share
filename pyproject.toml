@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "py-file-server"
+version = "1.0.1"
+description = "Lightweight HTTP file server with a modern web UI. No third-party dependencies."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Pandiyaraj K", email = "pandiyarajk@live.com" }]
+license = "MIT"
+keywords = ["file-server", "http", "upload", "share"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[project.scripts]
+py-file-server = "py_file_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["py_file_server"]

@@ -1,20 +1,4 @@
-"""
-share.py — Lightweight single-file HTTP file server.
-
-Features:
-  - Browse, upload, and download files via a modern web UI
-  - Admin login with server-side sessions and CSRF protection
-  - Upload restrictions (max size, blocked extensions) persisted to config.json
-  - Path traversal prevention, login rate limiting
-  - Rotating file log for all significant events
-
-Usage:
-    set ADMIN_PASSWORD=yourpassword   # Windows
-    export ADMIN_PASSWORD=yourpassword  # Linux/macOS
-    python share.py [--port PORT] [--dir PATH]
-
-Requirements: Python 3.10+, no third-party packages.
-"""
+"""Lightweight HTTP file server with a modern web UI."""
 
 import argparse
 import http.server
@@ -36,24 +20,28 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 # Configuration
 # ---------------------------------------------------------------------------
 
-_parser = argparse.ArgumentParser(description="Lightweight HTTP file server")
-_parser.add_argument("--port", type=int, default=8113, help="Port to listen on (default: 8113)")
-_parser.add_argument("--dir", default=r"C:\Share", help="Shared folder path (default: C:\\Share)")
-_args = _parser.parse_args()
-
-PORT = _args.port
-BASE_DIR = _args.dir
-CHUNK = 1024 * 1024                                         # file streaming chunk size
+PORT = 8113
+BASE_DIR = os.path.join(os.getcwd(), "share")
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+CHUNK = 1024 * 1024
 LOG_FILE = "share.log"
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 LOG_MAX_BYTES = 5 * 1024 * 1024
 BACKUP_COUNT = 5
-SESSION_TTL = 8 * 3600                                      # admin session lifetime (seconds)
-MAX_FAILURES = 5                                            # failed logins before lockout
-LOCKOUT_SECONDS = 300                                       # lockout duration
+SESSION_TTL = 8 * 3600
+MAX_FAILURES = 5
+LOCKOUT_SECONDS = 300
 
-# config.json lives next to this script so it survives restarts
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Lightweight HTTP file server")
+    parser.add_argument("--port", type=int, default=8113, help="Port (default: 8113)")
+    parser.add_argument(
+        "--dir",
+        default=os.path.join(os.getcwd(), "share"),
+        help="Shared folder path (default: ./share)",
+    )
+    return parser.parse_args()
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -157,6 +145,12 @@ def rl_reset(ip: str) -> None:
 # Upload configuration  (persisted to config.json)
 # ---------------------------------------------------------------------------
 
+DEFAULT_CONFIG = {
+    "max_upload_mb": 100,
+    "blocked_extensions": [".sh"],
+}
+
+
 class Config:
     """
     Runtime upload restrictions editable by the admin via /config.
@@ -166,22 +160,37 @@ class Config:
     """
 
     _lock = threading.Lock()
-    max_upload_mb: int = 100         # MB; 0 = unlimited
-    blocked_extensions: set = set() # e.g. {".exe", ".bat"}
+    max_upload_mb: int = DEFAULT_CONFIG["max_upload_mb"]
+    blocked_extensions: set = set(DEFAULT_CONFIG["blocked_extensions"])
+
+    @classmethod
+    def _apply(cls, data: dict) -> None:
+        with cls._lock:
+            cls.max_upload_mb = int(data.get("max_upload_mb", DEFAULT_CONFIG["max_upload_mb"]))
+            cls.blocked_extensions = set(data.get("blocked_extensions", DEFAULT_CONFIG["blocked_extensions"]))
+
+    @classmethod
+    def ensure_config(cls) -> None:
+        """Create config.json with defaults if it does not exist."""
+        if os.path.isfile(CONFIG_FILE):
+            return
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_CONFIG, f, indent=2)
+                f.write("\n")
+        except Exception as exc:
+            print(f"Warning: could not create {CONFIG_FILE}: {exc}")
 
     @classmethod
     def load(cls) -> None:
-        """Load settings from CONFIG_FILE. Silent if the file does not exist."""
+        """Load settings from CONFIG_FILE, creating it with defaults if missing."""
+        cls.ensure_config()
         try:
             with open(CONFIG_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-            with cls._lock:
-                cls.max_upload_mb = int(data.get("max_upload_mb", 0))
-                cls.blocked_extensions = set(data.get("blocked_extensions", []))
-        except FileNotFoundError:
-            pass
+                cls._apply(json.load(f))
         except Exception as exc:
             print(f"Warning: could not load {CONFIG_FILE}: {exc}")
+            cls._apply(DEFAULT_CONFIG)
 
     @classmethod
     def save(cls) -> None:
@@ -1231,9 +1240,18 @@ class Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
 
-if __name__ == "__main__":
+def main():
+    global PORT, BASE_DIR, CONFIG_FILE
+    args = _parse_args()
+    PORT = args.port
+    BASE_DIR = os.path.abspath(args.dir)
+    CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
     os.makedirs(BASE_DIR, exist_ok=True)
     Config.load()
     with Server(("0.0.0.0", PORT), Handler) as httpd:
-        print(f"📂 File Server: http://localhost:{PORT}")
+        print(f"File Server: http://localhost:{PORT}")
         httpd.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
