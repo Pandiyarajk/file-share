@@ -31,7 +31,8 @@ BASE_DIR = os.path.join(os.getcwd(), "share")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 CHUNK = 1024 * 1024
 LOG_FILE = "share.log"
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
+DEFAULT_ADMIN_PASSWORD = "admin123"
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", DEFAULT_ADMIN_PASSWORD)
 LOG_MAX_BYTES = 5 * 1024 * 1024
 BACKUP_COUNT = 5
 SESSION_TTL = 8 * 3600
@@ -272,6 +273,18 @@ class Config:
             cls.blocked_extensions = blocked
         cls.save()
 
+    # Multipart bodies carry part headers and boundaries on top of the file
+    # itself, so the body cap is the per-file cap plus a fixed allowance.
+    BODY_OVERHEAD = 1024 * 1024
+
+    @classmethod
+    def max_body_bytes(cls) -> int:
+        """Largest request body to accept, or 0 when uploads are uncapped."""
+        with cls._lock:
+            if not cls.max_upload_mb:
+                return 0
+            return cls.max_upload_mb * 1024 * 1024 + cls.BODY_OVERHEAD
+
     @classmethod
     def check_upload(cls, filename: str, size: int) -> str | None:
         """
@@ -327,6 +340,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if full != base and not full.startswith(base + os.sep):
             return None
         return full
+
+    def _read_exactly(self, length: int) -> bytes:
+        """Read exactly `length` bytes from the request body.
+
+        A single rfile.read(n) can return short on a slow or interrupted
+        connection, which would silently truncate an upload.
+        """
+        chunks: list[bytes] = []
+        remaining = length
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, CHUNK))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
 
     def _session_token(self) -> str | None:
         """Extract the session token from the request Cookie header."""
@@ -492,6 +521,23 @@ button {{ width: 100%; padding: 12px; border: none; background: var(--accent); b
 
         items = os.listdir(path)
         admin = self.is_admin()
+
+        # Upload and New Folder are admin-only actions, so their controls
+        # render only for an admin session. An anonymous visitor gets the
+        # listing and downloads, without buttons that could only fail.
+        mkdir_btn = (
+            '<button class="btn" id="mkdir-btn" '
+            'style="flex-shrink:0;padding:8px 14px;font-size:13px;">'
+            '📁 New Folder</button>'
+        ) if admin else ""
+        upload_section = (
+            '''
+<h3 style="margin-top:28px;margin-bottom:10px;color:var(--text-muted);font-size:15px;">📦 Upload</h3>
+<div class="drop" id="drop">Drag &amp; drop files here</div>
+<label class="upload-btn">📂 Browse Files<input type="file" id="fileInput" multiple></label>
+<div class="progress"><div class="bar" id="bar"></div></div>
+'''
+        ) if admin else ""
         csrf = self._csrf_token() or ""
 
         # Optional folder title / description from a .title file
@@ -744,7 +790,7 @@ input[type=file] {{ display: none; }}
         <option value="date-asc">Date ↑</option>
         <option value="date-desc">Date ↓</option>
     </select>
-    <button class="btn" id="mkdir-btn" style="flex-shrink:0;padding:8px 14px;font-size:13px;">📁 New Folder</button>
+    {mkdir_btn}
 </div>
 
 <div id="card-list">{card_rows}</div>
@@ -762,10 +808,7 @@ input[type=file] {{ display: none; }}
 </table>
 </div>
 
-<h3 style="margin-top:28px;margin-bottom:10px;color:var(--text-muted);font-size:15px;">📦 Upload</h3>
-<div class="drop" id="drop">Drag &amp; drop files here</div>
-<label class="upload-btn">📂 Browse Files<input type="file" id="fileInput" multiple></label>
-<div class="progress"><div class="bar" id="bar"></div></div>
+{upload_section}
 
 </div>
 
@@ -935,7 +978,11 @@ function openRename(oldName) {{
 }})();
 
 // ── File upload ────────────────────────────────────────────────────────────
+// The upload controls exist only for an admin session, so every reference
+// below is guarded: without them the rest of the page script must still run.
 const drop = document.getElementById("drop");
+const fileInput = document.getElementById("fileInput");
+if (drop && fileInput) {{
 drop.ondragover  = e => {{ e.preventDefault(); drop.classList.add("dragover"); }};
 drop.ondragleave = () => drop.classList.remove("dragover");
 drop.ondrop = e => {{
@@ -943,10 +990,11 @@ drop.ondrop = e => {{
     drop.classList.remove("dragover");
     for (let file of e.dataTransfer.files) upload(file);
 }};
-document.getElementById("fileInput").onchange = e => {{
+fileInput.onchange = e => {{
     for (let file of e.target.files) upload(file);
     e.target.value = "";
 }};
+}}
 function upload(file) {{
     const xhr = new XMLHttpRequest();
     xhr.upload.onprogress = e => {{ bar.style.width = (e.loaded / e.total * 100) + "%"; }};
@@ -1153,7 +1201,7 @@ input:focus {{ border-color: var(--accent); }}
                 return
             post     = parse_qs(body.decode(), keep_blank_values=True)
             password = post.get("password", [""])[0]
-            if password == ADMIN_PASSWORD:
+            if secrets.compare_digest(password, ADMIN_PASSWORD):
                 rl_reset(client_ip)
                 token, _ = session_create()
                 self.redirect("/", extra_headers={"Set-Cookie": self._session_cookie_header(token)})
@@ -1203,8 +1251,15 @@ input:focus {{ border-color: var(--accent); }}
             post   = parse_qs(body.decode(), keep_blank_values=True)
             action = post.get("action", [""])[0]
 
-            # mkdir is open to all users — no session/CSRF required
+            # Every write action requires a valid CSRF token and admin session
+            if not self._validate_csrf():
+                self.send_error_text(403, "Invalid or missing CSRF token")
+                return
+
             if action == "mkdir":
+                if not self.is_admin():
+                    self.send_error_text(401, "Admin login required")
+                    return
                 raw_name    = post.get("name", [""])[0].strip()
                 folder_name = os.path.basename(raw_name)
                 if not folder_name or folder_name.startswith("."):
@@ -1218,11 +1273,6 @@ input:focus {{ border-color: var(--accent); }}
                 logger.info("MKDIR ip=%s path=%s", client_ip, target)
                 self.send_response(200)
                 self.end_headers()
-                return
-
-            # All other actions require a valid CSRF token and admin session
-            if not self._validate_csrf():
-                self.send_error_text(403, "Invalid or missing CSRF token")
                 return
 
             if action == "delete":
@@ -1279,8 +1329,16 @@ input:focus {{ border-color: var(--accent); }}
                 self.end_headers()
                 return
 
-        # Multipart file upload — two-pass: validate all, then write atomically
+        # Multipart file upload: admin only, size-checked before the body
+        # is read, staged in temp files, then renamed into place.
         if os.path.isdir(path) and content_type.startswith("multipart/form-data"):
+            if not self.is_admin():
+                self.send_error_text(401, "Admin login required")
+                return
+            if not self._validate_csrf():
+                self.send_error_text(403, "Invalid or missing CSRF token")
+                return
+
             msg = Message()
             msg["content-type"] = content_type
             boundary = msg.get_param("boundary")
@@ -1288,12 +1346,28 @@ input:focus {{ border-color: var(--accent); }}
                 self.send_error_text(400, "Missing multipart boundary")
                 return
 
-            body           = self.rfile.read(length)
-            boundary_bytes = boundary.encode()
+            # Reject an oversized body before reading it, so a large upload
+            # cannot exhaust memory just to be rejected by check_upload later.
+            # The cap is per-file; the body also carries part headers, so allow
+            # a margin rather than comparing against the exact limit.
+            max_body = Config.max_body_bytes()
+            if max_body and length > max_body:
+                logger.info("UPLOAD_REJECTED ip=%s reason=body too large (%d bytes)",
+                            client_ip, length)
+                self.send_error_text(413, "Upload too large")
+                return
 
             # Pass 1: stage each part in a temp file and validate
             tmp_files: list[tuple[str, str, int]] = []  # (tmp_path, final_name, size)
             errors: list[str] = []
+
+            try:
+                body = self._read_exactly(length)
+            except DISCONNECT_ERRORS:
+                logger.debug("upload aborted by client before body was received")
+                return
+
+            boundary_bytes = boundary.encode()
 
             for part in body.split(b"--" + boundary_bytes):
                 if b'filename="' not in part:
@@ -1309,6 +1383,9 @@ input:focus {{ border-color: var(--accent); }}
                     errors.append("Malformed upload part")
                     continue
 
+                if not filename:
+                    continue
+
                 err = Config.check_upload(filename, len(file_data))
                 if err:
                     errors.append(f"{filename}: {err}")
@@ -1320,11 +1397,17 @@ input:focus {{ border-color: var(--accent); }}
                 try:
                     with os.fdopen(fd, "wb") as f:
                         f.write(file_data)
-                    tmp_files.append((tmp_path, filename, len(file_data)))
-                except Exception as exc:
-                    os.close(fd)
-                    os.unlink(tmp_path)
+                except OSError as exc:
+                    # os.fdopen took ownership of fd and closed it on the way
+                    # out, so fd must not be closed again here.
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
                     errors.append(f"{filename}: write error ({exc})")
+                    logger.warning("upload write failed for %s: %s", filename, exc)
+                    continue
+                tmp_files.append((tmp_path, filename, len(file_data)))
 
             if errors:
                 # Roll back all staged temp files before reporting the error
@@ -1393,6 +1476,11 @@ def main():
 
     with httpd:
         print(f"File Server: http://localhost:{PORT}")
+        if ADMIN_PASSWORD == DEFAULT_ADMIN_PASSWORD:
+            print("WARNING: ADMIN_PASSWORD is unset, so the built-in default "
+                  "is in use. Anyone who knows it can upload, rename and "
+                  "delete files. Set ADMIN_PASSWORD before exposing this "
+                  "server to a network you do not control.")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

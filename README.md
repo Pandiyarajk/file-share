@@ -50,7 +50,19 @@ py-file-server --port 9000 --dir D:\MyFiles
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ADMIN_PASSWORD` | `admin123` | Admin login password — set this in production |
+| `ADMIN_PASSWORD` | `admin123` | Admin login password. Set this before exposing the server; the default is published here and the server warns at startup while it is in use. |
+
+### Permissions
+
+Anonymous visitors can browse the listing and download files. Uploading,
+creating a folder, renaming, deleting a file and deleting a folder all require
+an admin session, and every one of those requests must also carry the session's
+CSRF token. The upload and New Folder controls are rendered only for a logged-in
+admin.
+
+Uploads are capped by `max_upload_mb` in `config.json` (default 100 MB). A
+request whose declared body exceeds that cap is refused with `413` before the
+body is read.
 
 ### Logging
 
