@@ -86,17 +86,32 @@ def _parse_args():
 
 logger = logging.getLogger("share")
 logger.setLevel(logging.INFO)
-_log_handler = logging.handlers.RotatingFileHandler(
-    LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8"
-)
-_log_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
-logger.addHandler(_log_handler)
 
-# Access lines are routed through this logger rather than stderr, so mirror
-# them to the console to keep the terminal output people expect.
+# Only the console handler is attached at import time. The rotating file
+# handler needs a writable location, which is not known until the shared
+# folder is resolved, and opening a file during import makes the package
+# unimportable from any directory the user cannot write to.
 _console_handler = logging.StreamHandler(sys.stdout)
 _console_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", "%H:%M:%S"))
 logger.addHandler(_console_handler)
+
+
+def _attach_file_logging(directory: str) -> None:
+    """Add the rotating file handler, writing inside the shared folder.
+
+    Failure to open the log is reported once and otherwise ignored: losing the
+    log file is not a reason to refuse to serve files.
+    """
+    path = os.path.join(directory, LOG_FILE)
+    try:
+        handler = logging.handlers.RotatingFileHandler(
+            path, maxBytes=LOG_MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.warning("file logging disabled, cannot write %s: %s", path, exc)
+        return
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    logger.addHandler(handler)
 
 
 def human(size: float) -> str:
@@ -1363,7 +1378,12 @@ def main():
     PORT = args.port
     BASE_DIR = os.path.abspath(args.dir)
     CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
-    os.makedirs(BASE_DIR, exist_ok=True)
+    try:
+        os.makedirs(BASE_DIR, exist_ok=True)
+    except OSError as exc:
+        print(f"Cannot use shared folder {BASE_DIR}: {exc}")
+        return 1
+    _attach_file_logging(BASE_DIR)
     Config.load()
     try:
         httpd = Server(("0.0.0.0", PORT), Handler)
