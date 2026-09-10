@@ -1,6 +1,11 @@
-"""Lightweight HTTP file server with a modern web UI."""
+"""Lightweight HTTP file server with a modern web UI.
+
+Author: Pandiyaraj Karuppasamy
+Modified: Sep-10-2026
+"""
 
 import argparse
+import base64
 import http.server
 import json
 import logging
@@ -9,6 +14,7 @@ import os
 import secrets
 import shutil
 import socketserver
+import sys
 import tempfile
 import threading
 import time
@@ -32,9 +38,40 @@ SESSION_TTL = 8 * 3600
 MAX_FAILURES = 5
 LOCKOUT_SECONDS = 300
 
+# Exceptions raised when the peer goes away mid-request. These are normal on a
+# LAN file server (browsers open speculative connections and abandon them, and
+# users cancel downloads), so they are logged at debug level, never as a
+# traceback.
+DISCONNECT_ERRORS = (
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+    TimeoutError,
+)
+
+# 1x1 transparent PNG, served for /favicon.ico so browsers stop generating 404s.
+FAVICON_BYTES = base64.b64decode(
+    b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+    b"YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+
+
+DISCLAIMER_EPILOG = """Provided AS IS, without warranty of any kind. Use entirely at your own risk.
+This server exposes --dir over the network: anyone who can reach the port can
+list and download those files, and an authenticated admin can upload, rename
+and delete them. Check the folder before you start, set a strong
+ADMIN_PASSWORD, and keep backups. The author accepts no liability for data
+loss, corruption or unauthorised disclosure. See DISCLAIMER.md; LICENSE is the
+governing text.
+"""
+
 
 def _parse_args():
-    parser = argparse.ArgumentParser(description="Lightweight HTTP file server")
+    parser = argparse.ArgumentParser(
+        description="Lightweight HTTP file server",
+        epilog=DISCLAIMER_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--port", type=int, default=8113, help="Port (default: 8113)")
     parser.add_argument(
         "--dir",
@@ -54,6 +91,12 @@ _log_handler = logging.handlers.RotatingFileHandler(
 )
 _log_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
 logger.addHandler(_log_handler)
+
+# Access lines are routed through this logger rather than stderr, so mirror
+# them to the console to keep the terminal output people expect.
+_console_handler = logging.StreamHandler(sys.stdout)
+_console_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", "%H:%M:%S"))
+logger.addHandler(_console_handler)
 
 
 def human(size: float) -> str:
@@ -336,15 +379,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return "session=; Path=/; HttpOnly; SameSite=Strict; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
 
     def serve_file(self, path: str) -> None:
-        """Stream a file to the client in CHUNK-sized pieces."""
-        size = os.path.getsize(path)
-        self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(size))
-        self.end_headers()
-        with open(path, "rb") as f:
-            while chunk := f.read(CHUNK):
-                self.wfile.write(chunk)
+        """Stream a file to the client in CHUNK-sized pieces.
+
+        A download the client cancels part-way raises a disconnect error on
+        write; that is not a server fault, so it is logged and swallowed.
+        """
+        try:
+            size = os.path.getsize(path)
+        except OSError as exc:
+            logger.warning("cannot stat %s: %s", path, exc)
+            self.send_error(404)
+            return
+
+        try:
+            f = open(path, "rb")
+        except OSError as exc:
+            logger.warning("cannot open %s: %s", path, exc)
+            self.send_error(403)
+            return
+
+        with f:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(size))
+            self.end_headers()
+            try:
+                while chunk := f.read(CHUNK):
+                    self.wfile.write(chunk)
+            except DISCONNECT_ERRORS:
+                logger.debug("download aborted by client: %s", path)
+            except OSError as exc:
+                logger.warning("read error while serving %s: %s", path, exc)
 
     def log_event(self, event_type: str, client_ip: str,
                   filename: str, size: int) -> None:
@@ -979,12 +1044,49 @@ input:focus {{ border-color: var(--accent); }}
 </html>"""
         self.send_html(html)
 
+    def send_favicon(self) -> None:
+        """Serve a tiny built-in icon so browsers do not log a 404 per page."""
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(FAVICON_BYTES)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(FAVICON_BYTES)
+
+    # ------------------------------------------------------------------
+    # Connection-level error handling
+    # ------------------------------------------------------------------
+
+    def handle_one_request(self) -> None:
+        """Serve one request, treating a peer disconnect as a normal close.
+
+        Browsers routinely open a speculative connection and drop it without
+        sending a request line, which makes the stdlib raise ConnectionReset
+        out of ``readline`` and print a traceback. Close quietly instead.
+        """
+        try:
+            super().handle_one_request()
+        except DISCONNECT_ERRORS as exc:
+            logger.debug("client %s disconnected: %s", self.client_address[0], exc)
+            self.close_connection = True
+
+    def handle_error(self, *args) -> None:
+        """Suppress the stdlib per-request traceback (handled above)."""
+
+    def log_message(self, fmt: str, *args) -> None:
+        """Route access logging through the rotating logger, not stderr."""
+        logger.info("%s - %s", self.client_address[0], fmt % args)
+
     # ------------------------------------------------------------------
     # GET handler
     # ------------------------------------------------------------------
 
     def do_GET(self) -> None:
         request_path, query = self.parse_path(self.path)
+
+        if request_path == "/favicon.ico":
+            self.send_favicon()
+            return
 
         if request_path == "/login":
             self.login_page()
@@ -1237,7 +1339,22 @@ input:focus {{ border-color: var(--accent); }}
 
 class Server(socketserver.ThreadingTCPServer):
     """TCP server with address reuse enabled for clean restarts."""
+
     allow_reuse_address = True
+    daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:
+        """Log unexpected per-request failures without dumping a traceback.
+
+        A dropped connection is expected traffic, so it is recorded at debug
+        level; anything else is a real bug and gets a full traceback in the
+        log file, where it can be read after the fact.
+        """
+        exc = sys.exc_info()[1]
+        if isinstance(exc, DISCONNECT_ERRORS):
+            logger.debug("connection from %s dropped: %s", client_address[0], exc)
+            return
+        logger.exception("error handling request from %s", client_address[0])
 
 
 def main():
@@ -1248,10 +1365,22 @@ def main():
     CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
     os.makedirs(BASE_DIR, exist_ok=True)
     Config.load()
-    with Server(("0.0.0.0", PORT), Handler) as httpd:
+    try:
+        httpd = Server(("0.0.0.0", PORT), Handler)
+    except OSError as exc:
+        print(f"Cannot bind port {PORT}: {exc}")
+        return 1
+
+    with httpd:
         print(f"File Server: http://localhost:{PORT}")
-        httpd.serve_forever()
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nShutting down.")
+        finally:
+            httpd.shutdown()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
